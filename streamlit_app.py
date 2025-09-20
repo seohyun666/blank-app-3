@@ -242,7 +242,7 @@ job_df, skills_df, energy_trend_df, climate_tech_df, impact_df = create_it_job_d
 
 # 메인 타이틀
 st.title("🌍 기후위기와 IT직업 변화 종합 대시보드")
-st.markdown("**실시간 기후 데이터와 미래 직업 전망을 통합 분석**")
+st.markdown("**실시간 기후 데이터와 미래 직업 전망 통합 분석**")
 st.markdown("---")
 
 # 주요 인사이트 섹션
