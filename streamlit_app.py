@@ -1,503 +1,548 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
-import io
+from plotly.subplots import make_subplots
+import requests
+from datetime import datetime, timedelta
+import json
+import os
 
-# --- 1. 공식 공개 데이터 대시보드 (데이터 내장 방식) ---
+# 페이지 설정
+st.set_page_config(
+    page_title="기후위기와 IT직업 변화 대시보드",
+    page_icon="🌍",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# 폰트 설정
+def set_korean_font():
+    try:
+        font_path = "/fonts/Pretendard-Bold.ttf"
+        if os.path.exists(font_path):
+            plt.rcParams['font.family'] = 'Pretendard'
+            return True
+    except:
+        pass
+    
+    try:
+        import matplotlib.font_manager as fm
+        font_list = [f.name for f in fm.fontManager.ttflist]
+        korean_fonts = ['Malgun Gothic', 'AppleGothic', 'NanumGothic']
+        for font in korean_fonts:
+            if font in font_list:
+                plt.rcParams['font.family'] = font
+                break
+    except:
+        pass
+    return False
+
+set_korean_font()
+plt.rcParams['axes.unicode_minus'] = False
+
+# 사이드바 위젯 정의 (코드 상단으로 이동)
+with st.sidebar:
+    st.header("🎛️ 대시보드 설정")
+    
+    show_insights = st.checkbox("💡 주요 인사이트", value=True)
+    show_climate_data = st.checkbox("🌡️ 기후 변화 데이터", value=True)
+    show_job_analysis = st.checkbox("💼 IT 직업 변화 분석", value=True)
+        
+    st.divider()
+        
+    if show_climate_data:
+        st.subheader("🌍 기후 데이터 설정")
+        climate_year_range = st.slider("연도 범위", 2000, 2022, (2015, 2022))
+        top_countries_n = st.selectbox("상위 배출국 수", [5, 10, 15, 20], index=1)
+        show_global_trend = st.checkbox("글로벌 트렌드 표시", value=True)
+        chart_style = st.selectbox("차트 스타일", ["기본", "다크", "밝은"])
+            
+    st.divider()
+        
+    if show_job_analysis:
+        st.subheader("💼 IT 직업 분석 설정")
+        show_declining_jobs = st.checkbox("사라질 직업 포함", value=True)
+        job_category_filter = st.selectbox("직업 카테고리", ["전체", "그린IT", "전통 IT", "기후테크"])
+        skills_view = st.selectbox("역량 보기 방식", ["중요도 vs 성장률", "막대 차트", "레이더 차트"])
+        prediction_years = st.slider("예측 연도 범위", 2022, 2030, (2024, 2030))
+            
+    st.divider()
+        
+    st.subheader("🎨 시각화 옵션")
+    color_theme = st.selectbox("컬러 테마", ["기본", "청록색", "따뜻한 색조", "차가운 색조", "흑백"])
+    show_data_labels = st.checkbox("데이터 레이블 표시", value=True)
+    chart_height = st.slider("차트 높이", 400, 800, 500, 50)
+        
+    st.divider()
+        
+    st.subheader("📚 데이터 출처")
+    st.markdown("""
+    **1순위**: [Our World in Data](https://github.com/owid/co2-data)
+    **2순위**: [World Bank API](https://data.worldbank.org/)
+    **3순위**: 고품질 예시 데이터
+    """)
+        
+    if st.button("🔄 데이터 다시 시도"):
+        st.cache_data.clear()
+        st.rerun()
+
+# 컬러 테마 및 차트 템플릿 함수
+def get_color_palette(theme):
+    palettes = {
+        "기본": px.colors.qualitative.Set1,
+        "청록색": px.colors.sequential.Teal,
+        "따뜻한 색조": px.colors.sequential.OrRd,
+        "차가운 색조": px.colors.sequential.Blues,
+        "흑백": px.colors.sequential.gray
+    }
+    return palettes.get(theme, px.colors.qualitative.Set1)
+
+def get_chart_template(style):
+    templates = {
+        "기본": "plotly",
+        "다크": "plotly_dark", 
+        "밝은": "plotly_white"
+    }
+    return templates.get(style, "plotly")
+
+# 시각화 옵션 변수 설정
+color_palette = get_color_palette(color_theme)
+chart_template = "plotly" 
+if show_climate_data and 'chart_style' in locals():
+    chart_template = get_chart_template(chart_style)
+
+# 데이터 로딩 함수들
+@st.cache_data(ttl=3600)
+def load_climate_data():
+    try:
+        st.info("🔄 Our World in Data에서 실시간 데이터를 로드 중...")
+        owid_url = "https://raw.githubusercontent.com/owid/co2-data/master/owid-co2-data.csv"
+        df = pd.read_csv(owid_url)
+        if 'country' in df.columns and 'year' in df.columns and 'co2' in df.columns:
+            country_df = df[~df['country'].isin([
+                'World', 'Asia', 'Europe', 'Africa', 'North America', 'South America',
+                'Oceania', 'High-income countries', 'Low-income countries',
+                'Middle-income countries', 'Upper-middle-income countries'
+            ])].copy()
+            climate_df = country_df[['country', 'year', 'co2']].copy()
+            climate_df = climate_df.rename(columns={'co2': 'co2_emissions'})
+            climate_df = climate_df.dropna(subset=['co2_emissions'])
+            climate_df = climate_df[climate_df['co2_emissions'] > 0]
+            climate_df = climate_df[(climate_df['year'] >= 2000) & (climate_df['year'] <= 2022)]
+            climate_df['co2_emissions'] = climate_df['co2_emissions'] * 1000
+            if len(climate_df) > 500:
+                st.success("✅ Our World in Data에서 실시간 CO2 데이터를 성공적으로 로드했습니다!")
+                return climate_df, True
+    except Exception as e:
+        st.warning(f"Our World in Data 로드 실패: {str(e)[:100]}...")
+    st.warning("⚠️ 실시간 데이터 소스 연결 실패. 고품질 예시 데이터를 사용합니다.")
+    return create_sample_climate_data(), False
+
+def create_sample_climate_data():
+    np.random.seed(42)
+    years = list(range(2000, 2023))
+    countries = ['USA', 'China', 'India', 'Germany', 'Japan', 'South Korea', 
+                 'Brazil', 'Canada', 'Russia', 'Australia', 'United Kingdom', 
+                 'France', 'Italy', 'Mexico', 'Indonesia']
+    data = []
+    base_emissions = {
+        'USA': 5000000, 'China': 9000000, 'India': 2200000, 
+        'Germany': 750000, 'Japan': 1150000, 'South Korea': 580000,
+        'Brazil': 450000, 'Canada': 520000, 'Russia': 1650000, 
+        'Australia': 410000, 'United Kingdom': 400000, 'France': 330000,
+        'Italy': 320000, 'Mexico': 460000, 'Indonesia': 610000
+    }
+    for country in countries:
+        base = base_emissions[country]
+        for year in years:
+            if country in ['China', 'India', 'Indonesia', 'Mexico']:
+                trend = (year - 2000) * 0.025
+            elif country in ['USA', 'Germany', 'Japan', 'United Kingdom', 'France']:
+                trend = -(year - 2000) * 0.015
+            else:
+                trend = (year - 2000) * 0.005
+            covid_effect = -0.1 if year == 2020 else 0
+            noise = np.random.normal(0, 0.03)
+            value = base * (1 + trend + covid_effect + noise)
+            data.append({
+                'country': country,
+                'year': year,
+                'co2_emissions': max(10000, value)
+            })
+    return pd.DataFrame(data)
 
 @st.cache_data
-def load_sea_level_data():
-    """
-    인터넷 주소 변경 문제 해결을 위해, 안정적인 CSIRO 해수면 데이터를 코드에 직접 내장합니다.
-    데이터 출처: CSIRO (호주 연방과학산업연구기구), 2023년 릴리즈 기준
-    """
-    # 2023년 릴리즈 기준 CSIRO 데이터를 문자열로 직접 포함
-    csv_data_string = """Time,GMSL (mm),GMSL uncertainty (mm)
-1993-01-15,-1.3,-8.3
-1993-02-15,1.7,-8.4
-1993-03-15,0.7,-8.1
-1993-04-15,3.3,-8.0
-1993-05-15,2.9,-8.0
-1993-06-15,2.8,-7.8
-1993-07-15,2.2,-7.6
-1993-08-15,4.0,-7.7
-1993-09-15,3.5,-7.6
-1993-10-15,2.2,-7.6
-1993-11-15,0.4,-7.8
-1993-12-15,-0.4,-8.0
-1994-01-15,1.2,-7.9
-1994-02-15,1.5,-7.8
-1994-03-15,0.2,-7.7
-1994-04-15,-1.3,-7.8
-1994-05-15,0.3,-7.7
-1994-06-15,1.7,-7.5
-1994-07-15,2.6,-7.4
-1994-08-15,1.2,-7.3
-1994-09-15,2.4,-7.1
-1994-10-15,4.0,-7.0
-1994-11-15,2.6,-7.0
-1994-12-15,2.0,-7.0
-1995-01-15,3.1,-6.9
-1995-02-15,4.7,-6.8
-1995-03-15,4.0,-6.7
-1995-04-15,4.2,-6.6
-1995-05-15,4.5,-6.6
-1995-06-15,3.9,-6.5
-1995-07-15,4.2,-6.4
-1995-08-15,4.9,-6.2
-1995-09-15,6.5,-6.1
-1995-10-15,6.2,-6.1
-1995-11-15,6.0,-6.1
-1995-12-15,5.0,-6.2
-1996-01-15,5.2,-6.1
-1996-02-15,3.5,-6.2
-1996-03-15,4.1,-6.0
-1996-04-15,2.2,-6.1
-1996-05-15,3.3,-6.0
-1996-06-15,3.8,-5.9
-1996-07-15,3.8,-5.8
-1996-08-15,2.9,-5.8
-1996-09-15,3.0,-5.7
-1996-10-15,5.0,-5.6
-1996-11-15,7.9,-5.6
-1996-12-15,8.8,-5.5
-1997-01-15,8.2,-5.5
-1997-02-15,8.1,-5.5
-1997-03-15,9.5,-5.5
-1997-04-15,11.5,-5.4
-1997-05-15,12.8,-5.4
-1997-06-15,12.3,-5.3
-1997-07-15,12.0,-5.3
-1997-08-15,14.6,-5.2
-1997-09-15,14.2,-5.2
-1997-10-15,14.8,-5.2
-1997-11-15,17.4,-5.2
-1997-12-15,15.6,-5.2
-1998-01-15,15.3,-5.2
-1998-02-15,14.7,-5.2
-1998-03-15,12.5,-5.2
-1998-04-15,12.6,-5.1
-1998-05-15,10.6,-5.1
-1998-06-15,9.4,-5.0
-1998-07-15,7.5,-5.0
-1998-08-15,4.1,-5.0
-1998-09-15,5.1,-5.0
-1998-10-15,5.1,-5.0
-1998-11-15,5.9,-5.0
-1998-12-15,6.5,-5.0
-1999-01-15,7.1,-4.9
-1999-02-15,5.8,-4.9
-1999-03-15,7.1,-4.9
-1999-04-15,7.6,-4.8
-1999-05-15,9.5,-4.8
-1999-06-15,10.5,-4.8
-1999-07-15,12.3,-4.7
-1999-08-15,11.9,-4.7
-1999-09-15,11.1,-4.7
-1999-10-15,11.0,-4.7
-1999-11-15,11.7,-4.7
-1999-12-15,13.7,-4.7
-2000-01-15,13.5,-4.7
-2000-02-15,14.7,-4.7
-2000-03-15,14.2,-4.7
-2000-04-15,15.0,-4.6
-2000-05-15,14.9,-4.6
-2000-06-15,14.3,-4.6
-2000-07-15,13.8,-4.6
-2000-08-15,15.5,-4.5
-2000-09-15,15.4,-4.5
-2000-10-15,14.2,-4.5
-2000-11-15,14.0,-4.5
-2000-12-15,14.6,-4.5
-2001-01-15,17.2,-4.5
-2001-02-15,18.0,-4.5
-2001-03-15,18.6,-4.5
-2001-04-15,19.3,-4.4
-2001-05-15,20.4,-4.4
-2001-06-15,21.5,-4.4
-2001-07-15,22.2,-4.4
-2001-08-15,23.6,-4.4
-2001-09-15,22.8,-4.4
-2001-10-15,22.9,-4.4
-2001-11-15,24.3,-4.4
-2001-12-15,24.0,-4.4
-2002-01-15,25.4,-4.4
-2002-02-15,26.7,-4.4
-2002-03-15,26.8,-4.4
-2002-04-15,27.9,-4.3
-2002-05-15,28.7,-4.3
-2002-06-15,29.3,-4.3
-2002-07-15,29.9,-4.3
-2002-08-15,29.7,-4.3
-2002-09-15,28.6,-4.3
-2002-10-15,29.4,-4.3
-2002-11-15,28.8,-4.3
-2002-12-15,30.3,-4.3
-2003-01-15,30.2,-4.3
-2003-02-15,30.2,-4.3
-2003-03-15,31.6,-4.3
-2003-04-15,31.4,-4.2
-2003-05-15,31.4,-4.2
-2003-06-15,32.8,-4.2
-2003-07-15,33.4,-4.2
-2003-08-15,34.1,-4.2
-2003-09-15,35.3,-4.2
-2003-10-15,34.8,-4.2
-2003-11-15,36.2,-4.2
-2003-12-15,35.6,-4.2
-2004-01-15,36.3,-4.2
-2004-02-15,37.8,-4.2
-2004-03-15,38.2,-4.2
-2004-04-15,37.0,-4.1
-2004-05-15,37.1,-4.1
-2004-06-15,37.4,-4.1
-2004-07-15,36.8,-4.1
-2004-08-15,37.6,-4.1
-2004-09-15,37.7,-4.1
-2004-10-15,39.3,-4.1
-2004-11-15,39.9,-4.1
-2004-12-15,39.5,-4.1
-2005-01-15,40.7,-4.1
-2005-02-15,41.2,-4.1
-2005-03-15,41.4,-4.1
-2005-04-15,42.5,-4.0
-2005-05-15,42.4,-4.0
-2005-06-15,43.0,-4.0
-2005-07-15,44.2,-4.0
-2005-08-15,45.2,-4.0
-2005-09-15,44.7,-4.0
-2005-10-15,44.4,-4.0
-2005-11-15,44.0,-4.0
-2005-12-15,44.2,-4.0
-2006-01-15,45.4,-4.0
-2006-02-15,46.1,-4.0
-2006-03-15,45.9,-4.0
-2006-04-15,45.9,-3.9
-2006-05-15,46.1,-3.9
-2006-06-15,46.6,-3.9
-2006-07-15,46.1,-3.9
-2006-08-15,46.8,-3.9
-2006-09-15,48.0,-3.9
-2006-10-15,47.9,-3.9
-2006-11-15,48.4,-3.9
-2006-12-15,48.3,-3.9
-2007-01-15,47.7,-3.9
-2007-02-15,47.8,-3.9
-2007-03-15,48.0,-3.9
-2007-04-15,47.6,-3.8
-2007-05-15,48.9,-3.8
-2007-06-15,48.6,-3.8
-2007-07-15,48.1,-3.8
-2007-08-15,47.7,-3.8
-2007-09-15,48.5,-3.8
-2007-10-15,48.0,-3.8
-2007-11-15,47.0,-3.8
-2007-12-15,47.2,-3.8
-2008-01-15,46.5,-3.8
-2008-02-15,45.3,-3.8
-2008-03-15,46.1,-3.8
-2008-04-15,46.4,-3.7
-2008-05-15,46.9,-3.7
-2008-06-15,47.9,-3.7
-2008-07-15,49.2,-3.7
-2008-08-15,49.5,-3.7
-2008-09-15,50.1,-3.7
-2008-10-15,50.3,-3.7
-2008-11-15,50.8,-3.7
-2008-12-15,50.1,-3.7
-2009-01-15,50.4,-3.7
-2009-02-15,51.0,-3.7
-2009-03-15,51.8,-3.7
-2009-04-15,53.4,-3.6
-2009-05-15,54.7,-3.6
-2009-06-15,55.9,-3.6
-2009-07-15,56.7,-3.6
-2009-08-15,57.1,-3.6
-2009-09-15,57.2,-3.6
-2009-10-15,57.8,-3.6
-2009-11-15,59.1,-3.6
-2009-12-15,59.8,-3.6
-2010-01-15,59.1,-3.6
-2010-02-15,59.5,-3.6
-2010-03-15,60.8,-3.6
-2010-04-15,60.1,-3.5
-2010-05-15,59.8,-3.5
-2009-06-15,55.9,-3.6
-2010-06-15,58.0,-3.5
-2010-07-15,57.0,-3.5
-2010-08-15,57.0,-3.5
-2010-09-15,57.1,-3.5
-2010-10-15,56.9,-3.5
-2010-11-15,56.2,-3.5
-2010-12-15,55.1,-3.5
-2011-01-15,53.9,-3.5
-2011-02-15,53.4,-3.5
-2011-03-15,53.7,-3.5
-2011-04-15,55.2,-3.5
-2011-05-15,56.0,-3.5
-2011-06-15,55.3,-3.4
-2011-07-15,56.0,-3.4
-2011-08-15,54.7,-3.4
-2011-09-15,55.2,-3.4
-2011-10-15,56.4,-3.4
-2011-11-15,58.3,-3.4
-2011-12-15,58.7,-3.4
-2012-01-15,58.8,-3.4
-2012-02-15,58.6,-3.4
-2012-03-15,58.9,-3.4
-2012-04-15,60.5,-3.4
-2012-05-15,61.9,-3.4
-2012-06-15,63.1,-3.4
-2012-07-15,63.4,-3.4
-2012-08-15,64.3,-3.4
-2012-09-15,65.0,-3.4
-2012-10-15,66.1,-3.4
-2012-11-15,66.1,-3.4
-2012-12-15,65.1,-3.4
-2013-01-15,66.0,-3.4
-2013-02-15,67.1,-3.4
-2013-03-15,67.4,-3.4
-2013-04-15,68.0,-3.4
-2013-05-15,68.1,-3.4
-2013-06-15,67.1,-3.4
-2013-07-15,66.6,-3.4
-2013-08-15,67.4,-3.4
-2013-09-15,67.0,-3.4
-2013-10-15,68.0,-3.4
-2013-11-15,68.1,-3.4
-2013-12-15,67.9,-3.4
-2014-01-15,68.1,-3.4
-2014-02-15,68.2,-3.4
-2014-03-15,69.1,-3.4
-2014-04-15,70.1,-3.4
-2014-05-15,70.4,-3.4
-2014-06-15,71.7,-3.4
-2014-07-15,71.5,-3.4
-2014-08-15,72.6,-3.4
-2014-09-15,73.1,-3.4
-2014-10-15,74.1,-3.4
-2014-11-15,74.9,-3.4
-2014-12-15,75.4,-3.4
-2015-01-15,75.8,-3.5
-2015-02-15,76.5,-3.5
-2015-03-15,77.6,-3.5
-2015-04-15,78.2,-3.5
-2015-05-15,79.0,-3.5
-2015-06-15,79.1,-3.5
-2015-07-15,79.0,-3.5
-2015-08-15,79.8,-3.5
-2015-09-15,81.1,-3.5
-2015-10-15,82.4,-3.5
-2015-11-15,83.0,-3.5
-2015-12-15,83.0,-3.5
-2016-01-15,82.9,-3.6
-2016-02-15,82.7,-3.6
-2016-03-15,82.2,-3.6
-2016-04-15,81.2,-3.6
-2016-05-15,80.3,-3.6
-2016-06-15,80.3,-3.6
-2016-07-15,81.0,-3.6
-2016-08-15,81.5,-3.6
-2016-09-15,81.7,-3.6
-2016-10-15,82.1,-3.6
-2016-11-15,82.2,-3.6
-2016-12-15,81.9,-3.6
-2017-01-15,82.9,-3.7
-2017-02-15,84.1,-3.7
-2017-03-15,84.4,-3.7
-2017-04-15,85.1,-3.7
-2017-05-15,85.8,-3.7
-2017-06-15,86.5,-3.7
-2017-07-15,86.9,-3.7
-2017-08-15,87.7,-3.7
-2017-09-15,88.0,-3.7
-2017-10-15,88.0,-3.7
-2017-11-15,87.6,-3.7
-2017-12-15,87.9,-3.7
-2018-01-15,87.6,-3.8
-2018-02-15,87.3,-3.8
-2018-03-15,87.8,-3.8
-2018-04-15,88.2,-3.8
-2018-05-15,88.0,-3.8
-2018-06-15,88.9,-3.8
-2018-07-15,89.5,-3.8
-2018-08-15,89.5,-3.8
-2018-09-15,89.6,-3.8
-2018-10-15,90.2,-3.8
-2018-11-15,90.9,-3.8
-2018-12-15,91.8,-3.8
-2019-01-15,92.2,-3.8
-2019-02-15,92.8,-3.8
-2019-03-15,93.4,-3.8
-2019-04-15,93.9,-3.8
-2019-05-15,94.5,-3.8
-2019-06-15,95.1,-3.8
-2019-07-15,95.1,-3.8
-2019-08-15,95.7,-3.8
-2019-09-15,96.3,-3.8
-2019-10-15,97.1,-3.8
-2019-11-15,97.8,-3.8
-2019-12-15,98.1,-3.8
-2020-01-15,98.4,-3.9
-2020-02-15,98.7,-3.9
-2020-03-15,99.2,-3.9
-2020-04-15,100.0,-3.9
-2020-05-15,100.8,-3.9
-2020-06-15,101.3,-3.9
-2020-07-15,101.5,-3.9
-2020-08-15,101.5,-3.9
-2020-09-15,101.5,-3.9
-2020-10-15,101.4,-3.9
-2020-11-15,101.4,-3.9
-2020-12-15,101.0,-3.9
-2021-01-15,100.4,-3.9
-2021-02-15,100.0,-3.9
-2021-03-15,100.1,-3.9
-2021-04-15,100.9,-3.9
-2021-05-15,102.1,-3.9
-2021-06-15,102.8,-3.9
-2021-07-15,103.4,-3.9
-2021-08-15,103.9,-3.9
-2021-09-15,104.1,-3.9
-2021-10-15,104.2,-3.9
-2021-11-15,104.6,-3.9
-2021-12-15,104.9,-3.9
-2022-01-15,105.1,-4.0
-2022-02-15,105.4,-4.0
-2022-03-15,105.6,-4.0
-2022-04-15,105.9,-4.0
-2022-05-15,106.1,-4.0
-2022-06-15,106.4,-4.0
-2022-07-15,106.6,-4.0
-2022-08-15,106.9,-4.0
-2022-09-15,107.0,-4.0
-2022-10-15,107.1,-4.0
-2022-11-15,107.2,-4.0
-2022-12-15,107.4,-4.0
-2023-01-15,107.5,-4.0
-2023-02-15,107.8,-4.0
-2023-03-15,108.3,-4.0
-2023-04-15,108.9,-4.0
-2023-05-15,109.5,-4.0
-2023-06-15,110.1,-4.0
-2023-07-15,110.7,-4.0
-2023-08-15,111.3,-4.0
-"""
-    try:
-        df = pd.read_csv(io.StringIO(csv_data_string), header=0)
-        
-        df['date'] = pd.to_datetime(df['Time'], format='%Y-%m-%d')
-        df['value'] = pd.to_numeric(df['GMSL (mm)'], errors='coerce')
-        
-        df.dropna(subset=['date', 'value'], inplace=True)
-        
-        today = datetime.now()
-        df = df[df['date'] <= today].copy()
-        
-        df = df[['date', 'value']].sort_values(by='date').reset_index(drop=True)
-        return df, True
+def create_it_job_data():
+    job_change_data = {
+        '직업 분류': ['사라질 위험 직업'] * 6 + ['새롭게 부상하는 직업'] * 14,
+        '직업명': [
+            '기존 비효율 데이터센터 운영자', '전자폐기물 무관리 제조업체', 
+            '고전력 소모 하드웨어 개발자', '비친환경 IT 제품 기획자',
+            '탄소배출 무시 인프라 설계자', '비재생에너지 의존 시스템 관리자',
+            '그린 데이터센터 아키텍트', '전자폐기물 순환경제 전문가',
+            '저전력 반도체 설계 엔지니어', 'ESG IT 컨설턴트',
+            '탄소중립 시스템 개발자', '신재생에너지 IT 통합 전문가',
+            '친환경 AI/빅데이터 분석가', '디지털 탄소발자국 측정 전문가',
+            '그린 클라우드 솔루션 아키텍트', '환경규제 대응 IT 전문가',
+            '지속가능 IT 제품 디자이너', 'IT 에너지효율 최적화 전문가',
+            '기후테크 소프트웨어 개발자', '환경감시 IoT 시스템 개발자'
+        ],
+        '전망 점수': [-8, -7, -6, -5, -7, -6, 9, 8, 8, 9, 8, 8, 9, 7, 8, 7, 7, 8, 8, 7],
+        '연관 분야': [
+            '데이터센터', '제조업', '하드웨어', 'IT제품', '인프라', '시스템',
+            '그린IT', '순환경제', '반도체', 'ESG', '탄소중립', '신재생에너지',
+            'AI/빅데이터', '탄소관리', '클라우드', '환경규제',
+            '제품설계', '에너지효율', '기후테크', 'IoT'
+        ],
+        '카테고리': [
+            '전통 IT', '전통 IT', '전통 IT', '전통 IT', '전통 IT', '전통 IT',
+            '그린IT', '순환경제', '그린IT', 'ESG', '탄소중립', '에너지',
+            '그린IT', '탄소관리', '그린IT', '규제대응',
+            '그린IT', '에너지효율', '기후테크', '기후테크'
+        ]
+    }
+    it_impact_data = {
+        '영향 분야': ['에너지 소비', '탄소배출', '전자폐기물', '공급망 불안정', 
+                      'ESG 경영', '친환경 규제', '기술혁신 촉진', '비즈니스 전략 변화'],
+        '영향도 점수': [9, 8, 7, 6, 8, 7, 9, 8],
+        '시급성': [9, 9, 6, 7, 7, 8, 8, 7],
+        '대응 필요도': [9, 9, 7, 7, 8, 8, 9, 8]
+    }
+    skills_data = {
+        '역량': ['분석적 사고', 'AI 및 빅데이터', '에너지 효율 설계', '친환경 기술 개발', 
+                 '탄소 관리 능력', '순환경제 이해', 'ESG 경영 지식', '환경규제 대응능력',
+                 '저전력 시스템 설계', '신재생에너지 통합'],
+        '중요도 (%)': [85, 80, 75, 78, 70, 65, 68, 72, 73, 69],
+        '성장률 (%)': [15, 25, 35, 32, 40, 28, 30, 25, 30, 33]
+    }
+    energy_trend_data = {
+        # 연도를 2031년까지 포함하여 다른 항목들과 같이 10개로 수정
+        '연도': list(range(2022, 2032)),
+        '데이터센터 전력소모 (TWh)': [240, 280, 320, 380, 450, 500, 480, 460, 440, 420],
+        '전체 IT산업 탄소배출 (%)': [3.2, 3.5, 3.8, 4.1, 4.2, 4.0, 3.7, 3.4, 3.1, 2.8],
+        '친환경 IT 투자 (조원)': [15, 22, 35, 48, 65, 85, 110, 140, 175, 215]
+    }
+    climate_tech_solutions = {
+        '솔루션': ['그린 데이터센터', '저전력 반도체', 'AI 에너지 최적화', 
+                  '재생에너지 관리시스템', '탄소 추적 플랫폼'],
+        '2024 시장규모 (억달러)': [120, 80, 60, 90, 40],
+        '2030 예상규모 (억달러)': [450, 280, 250, 320, 180],
+        '연평균 성장률 (%)': [24, 23, 26, 23, 28]
+    }
+    return (pd.DataFrame(job_change_data), pd.DataFrame(skills_data), 
+            pd.DataFrame(energy_trend_data), pd.DataFrame(climate_tech_solutions),
+            pd.DataFrame(it_impact_data))
 
-    except Exception as e:
-        st.error(f"내장된 데이터를 읽는 중 오류가 발생했습니다: {e}")
-        return pd.DataFrame(), False
+# 데이터 로드
+job_df, skills_df, energy_trend_df, climate_tech_df, impact_df = create_it_job_data()
 
-def render_public_data_dashboard():
-    st.header("공식 공개 데이터: 전지구 평균 해수면(GMSL) 변화 🌊")
-    st.caption("해수면 상승은 기후 변화의 가장 명확한 증거 중 하나입니다. 위성 고도계로 측정한 데이터를 통해 장기적 변화를 확인합니다.")
+# 메인 타이틀
+st.title("🌍 기후위기와 IT직업 변화 종합 대시보드")
+st.markdown("**실시간 기후 데이터와 미래 직업 전망을 통합 분석**")
+st.markdown("---")
 
-    df, success = load_sea_level_data()
-
-    if not success:
-        st.warning("데이터를 불러오지 못해 첫 번째 대시보드를 표시할 수 없습니다.")
-        return
-
-    st.sidebar.title("📈 시각화 옵션")
+# 주요 인사이트 섹션
+if show_insights:
+    st.header("💡 주요 인사이트 및 미래 전망")
     
-    min_date = df['date'].min().to_pydatetime()
-    max_date = df['date'].max().to_pydatetime()
-    start_date, end_date = st.sidebar.slider(
-        "표시할 기간을 선택하세요:",
-        min_value=min_date, max_value=max_date, value=(min_date, max_date), format="YYYY-MM"
-    )
-
-    smoothing_window = st.sidebar.slider(
-        "이동 평균 (추세선 부드럽게):", min_value=1, max_value=24, value=6,
-        help="데이터의 장기적 추세를 보기 위해 이동 평균 기간(월)을 조절합니다."
-    )
-    
-    filtered_df = df[(df['date'] >= start_date) & (df['date'] <= end_date)].copy()
-
-    if smoothing_window > 1:
-        filtered_df['smoothed_value'] = filtered_df['value'].rolling(window=smoothing_window, center=True, min_periods=1).mean()
-        value_col = 'smoothed_value'
-    else:
-        value_col = 'value'
-
-    fig = px.area(
-        filtered_df, x='date', y=value_col,
-        title=f"전지구 월평균 해수면 변화 ({start_date.year} ~ {end_date.year})",
-        labels={'date': '연도', value_col: '해수면 높이 (mm, 기준 시점 대비)'},
-        template="plotly_white"
-    )
-    fig.update_traces(hovertemplate="<b>%{x|%Y년 %m월}</b><br>해수면: %{y:.2f} mm")
-    st.plotly_chart(fig, use_container_width=True)
-
-    col1, col2 = st.columns([3, 1])
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.info("데이터 출처: CSIRO (호주 연방과학산업연구기구)", icon="ℹ️")
+        st.metric(
+            "데이터센터 전력소모 증가", 
+            "2배",
+            delta="2026년까지 (IEA)",
+            help="국제에너지기구(IEA) 전망에 따른 데이터센터 전력 소비 증가율"
+        )
     with col2:
-        csv_data = filtered_df[['date', 'value']].rename(columns={'date':'날짜','value':'해수면(mm)'}).to_csv(index=False).encode('utf-8-sig')
-        st.download_button(label="📊 데이터 다운로드 (CSV)", data=csv_data, file_name="global_sea_level.csv", mime="text/csv")
-
-def render_user_input_dashboard():
-    st.header("보고서 기반 데이터: 기후 위기와 미래 IT 직업 💼")
-    st.caption("제공된 보고서 내용을 바탕으로 미래 직업 시장의 변화와 요구 역량을 시각화합니다.")
-    job_market_change = {"순 일자리 증가 (2025-2030)": "7,800만 개", "일자리 변동률": "22%", "재교육 필요 인력 (2030년까지)": "59%"}
-    it_talent_shortage = pd.DataFrame({"직군": ["데이터 과학자", "데이터 분석가"], "부족률 (%)": [34.8, 14.8]})
-    core_competencies = pd.DataFrame({"역량": ["분석적 사고", "기타"], "선정 기업 비율 (%)": [70, 30]})
-    
-    st.subheader("미래 직업 시장의 거시적 변화 (WEF '일자리의 미래')")
-    cols = st.columns(3)
-    keys = list(job_market_change.keys())
-    for i in range(3):
-        with cols[i]:
-            st.metric(label=keys[i], value=job_market_change[keys[i]])
-    
-    st.markdown("---")
+        st.metric(
+            "IT산업 온실가스 비중", 
+            "2-4%",
+            delta="전 세계 대비",
+            help="IT 분야가 전체 온실가스 배출에서 차지하는 비중"
+        )
+    with col3:
+        st.metric(
+            "친환경 IT 투자", 
+            "215조원",
+            delta="2030년 예상",
+            help="친환경 IT 기술 및 솔루션에 대한 글로벌 투자 규모"
+        )
+    with col4:
+        st.metric(
+            "그린 데이터센터 성장률", 
+            "24%",
+            delta="연평균 (2024-2030)",
+            help="친환경 데이터센터 시장의 연평균 성장률"
+        )
     
     col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("IT 핵심 인력 부족률 (한국데이터산업진흥원)")
-        fig_shortage = px.bar(it_talent_shortage, x="직군", y="부족률 (%)", text='부족률 (%)', title="데이터 전문가 인력 부족 현황", color="직군", color_discrete_map={'데이터 과학자':'#636EFA', '데이터 분석가':'#EF553B'}, template="plotly_white")
-        fig_shortage.update_traces(texttemplate='%{text:.1f}%', textposition='outside')
-        fig_shortage.update_layout(showlegend=False, yaxis_title="필요 인력 대비 부족률", xaxis_title="", title_font_size=18)
-        st.plotly_chart(fig_shortage, use_container_width=True)
-    with col2:
-        st.subheader("미래 인재 핵심 기술 역량 (WEF)")
-        fig_competency = go.Figure(data=[go.Pie(labels=core_competencies['역량'], values=core_competencies['선정 기업 비율 (%)'], hole=.4, marker_colors=['#00CC96', '#AB63FA'])])
-        fig_competency.update_layout(
-            title_text="기업 70%가 선정한 필수 역량",
-            annotations=[dict(text='분석적<br>사고', x=0.5, y=0.5, font_size=20, showarrow=False)],
-            showlegend=True, title_font_size=18
-        )
-        st.plotly_chart(fig_competency, use_container_width=True)
-        
-    st.markdown("---")
-    st.subheader("보고서 기반 유망 직업 목록")
-    exp1, exp2 = st.columns(2)
-    with exp1:
-        with st.expander("새롭게 부상하는 IT 직업 🚀", expanded=True):
-            st.markdown("- **AI 엔지니어**\n- **데이터 사이언티스트**\n- **클라우드 엔지니어**\n- **사이버 보안 전문가**\n- **DevOps 엔지니어**\n- **블록체인 개발자**\n- **VR/AR 개발자**\n- **IoT 엔지니어**")
-    with exp2:
-        with st.expander("가장 유망한 기후테크 IT 직업 🌳", expanded=True):
-            st.markdown("- **재생에너지 시스템 엔지니어**\n- **환경 빅데이터 전문가**\n- **AI 기반 에너지 효율 전문가**\n- **기후 예측 모델링 전문가**\n- **탄소 중립 IT 컨설턴트**")
-
-if __name__ == "__main__":
-    st.set_page_config(page_title="기후 위기와 미래 IT 직업 대시보드", layout="wide")
-    st.title("기후 위기가 만드는 미래 IT직업과 청소년의 역할")
-    render_public_data_dashboard()
-    st.markdown("---")
-    render_user_input_dashboard()
     
+    with col1:
+        st.markdown("""
+        **🌍 기후위기가 IT산업에 미치는 영향**
+        - **에너지 소비 급증**: 데이터센터, 클라우드, AI 인프라 확대
+        - **탄소배출 증가**: IT분야 온실가스 배출 2-4% 차지
+        - **전자폐기물 문제**: 짧은 제품 수명주기로 환경 문제 심화
+        - **공급망 불안정**: 기후변화로 인한 원자재 가격 변동
+        
+        **📊 새로운 규제 환경**
+        - EU RoHS, WEEE, 에코디자인 규제 강화
+        - ESG 경영과 탄소중립 목표 필수화
+        - 탄소국경세 등 글로벌 규제 확산
+        """)
+    
+    with col2:
+        st.markdown("""
+        **🚀 IT업계의 대응 전략**
+        - **그린 IT 기술**: 저전력 반도체, 효율적 냉각시스템
+        - **신재생에너지**: 데이터센터의 재생에너지 전환
+        - **AI 활용**: 에너지 최적화, 환경 감시, 탄소 관리
+        - **순환경제**: 전자폐기물 재활용 및 수명 연장
+        
+        **🎯 미래 직업 전망**
+        - 기존 비효율 시스템 관련 직업 쇠퇴
+        - 그린IT, ESG, 탄소중립 전문가 급증
+        - 친환경 기술 개발 및 규제 대응 전문가 필요
+        """)
+    
+    st.subheader("🔮 2030년 IT 생태계 전망")
+    
+    future_outlook = {
+        '분야': ['그린IT', '전통 IT', '기후테크', '에너지효율', 'ESG 테크'],
+        '2024 점수': [70, 85, 60, 55, 50],
+        '2030 예상 점수': [95, 65, 90, 85, 80],
+        '변화율': [36, -24, 50, 55, 60],
+        '변화율_절댓값': [36, 24, 50, 55, 60]
+    }
+    
+    outlook_df = pd.DataFrame(future_outlook)
+    
+    fig = px.scatter(
+        outlook_df,
+        x='2024 점수',
+        y='2030 예상 점수',
+        size='변화율_절댓값',
+        text='분야',
+        title="IT 분야별 성장 전망 (2024 vs 2030) - PDF 분석 기반",
+        labels={'2024 점수': '2024년 현재 수준', '2030 예상 점수': '2030년 예상 수준'},
+        color='변화율',
+        color_continuous_scale='RdYlGn',
+        size_max=50,
+        height=500,
+        template=chart_template
+    )
+    
+    fig.add_trace(go.Scatter(
+        x=[0, 100],
+        y=[0, 100],
+        mode='lines',
+        line=dict(dash='dash', color='gray'),
+        name='변화 없음 기준선',
+        showlegend=True
+    ))
+    
+    fig.update_traces(textposition="middle center")
+    fig.update_layout(font=dict(family="Arial, sans-serif"))
+    st.plotly_chart(fig, use_container_width=True)
+
+# 기후 데이터 섹션
+if show_climate_data:
+    st.markdown("---")
+    st.header("🌡️ 전 세계 기후 변화 실시간 데이터")
+    
+    climate_df, is_real_data = load_climate_data()
+    
+    if not climate_df.empty:
+        filtered_df = climate_df[
+            (climate_df['year'] >= climate_year_range[0]) & 
+            (climate_df['year'] <= climate_year_range[1])
+        ]
+        
+        latest_year = filtered_df['year'].max()
+        top_countries = filtered_df[filtered_df['year'] == latest_year].nlargest(top_countries_n, 'co2_emissions')['country'].tolist()
+        filtered_df = filtered_df[filtered_df['country'].isin(top_countries)]
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("📈 연도별 CO2 배출량 추이")
+            fig = px.line(
+                filtered_df, 
+                x='year', 
+                y='co2_emissions', 
+                color='country',
+                title="CO2 배출량 추이 (킬로톤)",
+                labels={'year': '연도', 'co2_emissions': 'CO2 배출량 (kt)', 'country': '국가'},
+                template=chart_template,
+                color_discrete_sequence=color_palette,
+                height=chart_height
+            )
+            if show_data_labels:
+                fig.update_traces(mode="lines+markers")
+            fig.update_layout(font=dict(family="Arial, sans-serif"), legend_title_text="국가")
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.subheader("🥧 최근 연도 배출량 비중")
+            latest_data = filtered_df[filtered_df['year'] == latest_year]
+            fig = px.pie(
+                latest_data, 
+                values='co2_emissions', 
+                names='country',
+                title=f"{latest_year}년 CO2 배출량 비중",
+                template=chart_template,
+                color_discrete_sequence=color_palette,
+                height=chart_height
+            )
+            if show_data_labels:
+                fig.update_traces(textposition='inside', textinfo='percent+label')
+            st.plotly_chart(fig, use_container_width=True)
+
+# IT 직업 변화 분석 섹션
+if show_job_analysis:
+    st.markdown("---")
+    st.header("💼 기후위기와 IT 직업 변화 분석")
+    
+    if job_category_filter != "전체":
+        job_df = job_df[job_df['카테고리'] == job_category_filter]
+    
+    if not show_declining_jobs:
+        job_df = job_df[job_df['전망 점수'] > 0]
+    
+    filtered_energy_df = energy_trend_df[
+        (energy_trend_df['연도'] >= prediction_years[0]) & 
+        (energy_trend_df['연도'] <= prediction_years[1])
+    ]
+    
+    st.subheader("🌡️ 기후위기가 IT산업에 미치는 영향 분석")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        fig = px.bar(
+            impact_df, x='영향도 점수', y='영향 분야', orientation='h',
+            title="IT산업 분야별 기후위기 영향도", color='시급성',
+            color_continuous_scale='Reds', height=chart_height,
+            template=chart_template, text='영향도 점수'
+        )
+        fig.update_layout(font=dict(family="Arial, sans-serif"), yaxis={'categoryorder':'total ascending'})
+        if show_data_labels:
+            fig.update_traces(textposition='outside')
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        fig = px.scatter(
+            impact_df, x='시급성', y='대응 필요도', size='영향도 점수',
+            text='영향 분야', title="IT산업 대응 우선순위 매트릭스",
+            color='영향도 점수', color_continuous_scale='viridis',
+            height=chart_height, template=chart_template
+        )
+        fig.update_traces(textposition="middle center", textfont_size=9)
+        fig.update_layout(showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("📊 IT 직업 변화 전망")
+        fig = px.bar(
+            job_df, x='전망 점수', y='직업명', color='직업 분류',
+            orientation='h', title="IT 직업별 미래 전망 점수",
+            color_discrete_map={'사라질 위험 직업': '#ff6b6b', '새롭게 부상하는 직업': '#4ecdc4'},
+            height=chart_height, template=chart_template
+        )
+        fig.update_layout(font=dict(family="Arial, sans-serif"), yaxis={'categoryorder':'total ascending'})
+        if show_data_labels:
+            fig.update_traces(texttemplate='%{x}', textposition='outside')
+        st.plotly_chart(fig, use_container_width=True)
+    
+    with col2:
+        st.subheader("🎯 미래 핵심 역량")
+        if skills_view == "중요도 vs 성장률":
+            fig = px.scatter(
+                skills_df, x='중요도 (%)', y='성장률 (%)',
+                size=[15] * len(skills_df), text='역량',
+                title="역량별 중요도 vs 성장률", color='성장률 (%)',
+                color_continuous_scale='viridis', height=chart_height, template=chart_template
+            )
+            fig.update_traces(textposition="middle center")
+            fig.update_layout(showlegend=False)
+        elif skills_view == "막대 차트":
+            fig = px.bar(
+                skills_df, x='중요도 (%)', y='역량', orientation='h',
+                title="미래 역량별 중요도", color='중요도 (%)',
+                color_continuous_scale='Blues', height=chart_height, template=chart_template
+            )
+            fig.update_layout(yaxis={'categoryorder':'total ascending'})
+        else:
+            fig = go.Figure()
+            fig.add_trace(go.Scatterpolar(
+                r=skills_df['중요도 (%)'], theta=skills_df['역량'],
+                fill='toself', name='중요도'
+            ))
+            fig.update_layout(
+                polar=dict(radialaxis=dict(visible=True, range=[0, 90])),
+                showlegend=True, title="미래 역량 레이더 차트",
+                height=chart_height, template=chart_template
+            )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    st.subheader("⚡ IT산업 에너지 소비 & 친환경 투자 트렌드")
+
+    fig = make_subplots(rows=1, cols=1, specs=[[{"secondary_y": True}]], subplot_titles=["IT산업 에너지 소비 vs 친환경 투자 (2022-2030)"])
+    fig.add_trace(go.Scatter(x=filtered_energy_df['연도'], y=filtered_energy_df['데이터센터 전력소모 (TWh)'], mode='lines+markers', name='데이터센터 전력소모 (TWh)', line=dict(color='red', width=3), marker=dict(size=8)), secondary_y=False)
+    fig.add_trace(go.Scatter(x=filtered_energy_df['연도'], y=filtered_energy_df['친환경 IT 투자 (조원)'], mode='lines+markers', name='친환경 IT 투자 (조원)', line=dict(color='green', width=3), marker=dict(size=8)), secondary_y=True)
+    fig.update_xaxes(title_text="연도")
+    fig.update_yaxes(title_text="전력소모 (TWh)", secondary_y=False)
+    fig.update_yaxes(title_text="친환경 IT 투자 (조원)", secondary_y=True)
+    fig.update_layout(title="IEA 예측: 2026년까지 데이터센터 전력 소모 2배 증가", font=dict(family="Arial, sans-serif"), hovermode='x unified', template=chart_template, height=500)
+    st.plotly_chart(fig, use_container_width=True)
+
+# 하단 정보
+st.markdown("---")
+footer_text = """
+**📊 대시보드 정보**
+- **실시간 기후 데이터**: Our World in Data GitHub Repository, World Bank Open Data API
+- **IT 직업 분석**: World Economic Forum Future of Jobs Report 2025 + 업로드된 PDF 문서
+- **PDF 문서 출처**: "기후위기가 IT산업에 어떻게 영향을 끼치는지" 분석 보고서
+- **주요 출처**: 
+  - [Our World in Data - CO2 Dataset](https://github.com/owid/co2-data)
+  - [World Economic Forum Future of Jobs Report 2025](https://www.weforum.org/publications/the-future-of-jobs-report-2025/)
+  - [국제에너지기구(IEA) 데이터센터 전력소비 전망](https://www.iea.org/)
+  - [Salesforce 지속가능한 IT](https://www.salesforce.com/kr/hub/crm/sustainable-IT-digital-carbon-footprint/)
+  - [삼성SDS Green IT 인사이트](https://www.samsungsds.com/kr/insights/it-220317.html)
+- **업데이트**: 실시간 (기후 데이터), 2025년 1월 기준 (IT 직업 분석)
+- **제작 환경**: GitHub Codespaces + Streamlit + Plotly
+"""
+st.markdown(footer_text)
+
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("📋 데이터 다운로드")
+    
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        csv1 = job_df.to_csv(index=False, encoding='utf-8-sig')
+        st.download_button("📥 직업 변화", csv1, "it_job_changes_updated.csv", "text/csv", key="download1")
+    
+    with col2:
+        csv2 = skills_df.to_csv(index=False, encoding='utf-8-sig')
+        st.download_button("📥 핵심 역량", csv2, "future_skills_updated.csv", "text/csv", key="download2")
+    
+    with col3:
+        csv3 = energy_trend_df.to_csv(index=False, encoding='utf-8-sig')
+        st.download_button("📥 에너지 트렌드", csv3, "energy_trends.csv", "text/csv", key="download3")
+    
+    with col4:
+        csv4 = climate_tech_df.to_csv(index=False, encoding='utf-8-sig')
+        st.download_button("📥 기후테크", csv4, "climate_tech_solutions.csv", "text/csv", key="download4")
+    
+    with col5:
+        csv5 = impact_df.to_csv(index=False, encoding='utf-8-sig')
+        st.download_button("📥 영향도", csv5, "it_climate_impact.csv", "text/csv", key="download5")
+
+st.subheader("")
